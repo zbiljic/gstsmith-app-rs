@@ -1,0 +1,27 @@
+[tasks."rust:fmt"]
+description = "Format all Rust code"
+run = "cargo fmt --all"
+
+[tasks."rust:fmt:check"]
+description = "Check that Rust code is formatted"
+run = "cargo fmt --all -- --check"
+
+[tasks."rust:check:workspace"]
+description = "Check workspace crates and examples"
+run = "cargo check --workspace --all-targets"
+
+[tasks."rust:lint:clippy"]
+description = "Check Rust code with clippy"
+run = "cargo clippy --workspace --all-targets -- -D warnings"
+
+[tasks."rust:test"]
+description = "Run workspace tests"
+run = "cargo test --workspace --all-targets"
+
+[tasks."rust:build"]
+description = "Build workspace crates and examples"
+run = "cargo build --workspace --all-targets"
+
+[tasks."rust:clean"]
+description = "Remove Rust build artifacts"
+run = "cargo clean"

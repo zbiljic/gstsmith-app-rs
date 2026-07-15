@@ -1,0 +1,4 @@
+[tasks.build]
+description = "Build the project"
+alias = "b"
+depends = ["rust:build"]

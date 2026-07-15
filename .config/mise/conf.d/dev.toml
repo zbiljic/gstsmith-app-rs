@@ -1,0 +1,25 @@
+[tasks.fmt]
+description = "Format project source code"
+depends = ["*:*fmt"]
+
+[tasks."fmt:check"]
+description = "Check source formatting"
+depends = ["*:fmt:check"]
+
+[tasks.lint]
+description = "Run all lint checks"
+depends = ["*:lint:*"]
+
+[tasks.check]
+description = "Check project source code"
+depends = ["*:check:*"]
+
+[tasks.test]
+description = "Run tests"
+alias = "t"
+depends = ["*:test"]
+
+[tasks."pre-commit"]
+description = "Run the full local development gate"
+alias = "prk"
+depends = ["fmt:check", "lint", "check", "test"]
