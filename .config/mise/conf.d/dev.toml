@@ -10,6 +10,10 @@ depends = ["*:fmt:check"]
 description = "Run all lint checks"
 depends = ["*:lint:*"]
 
+[tasks."deps:check"]
+description = "Check dependency policy"
+depends = ["*:deps:check"]
+
 [tasks.check]
 description = "Check project source code"
 depends = ["*:check:*"]
@@ -22,4 +26,4 @@ depends = ["*:test"]
 [tasks."pre-commit"]
 description = "Run the full local development gate"
 alias = "prk"
-depends = ["fmt:check", "lint", "check", "test"]
+depends = ["fmt:check", "lint", "deps:check", "check", "test"]

@@ -14,6 +14,10 @@ run = "cargo check --workspace --all-targets"
 description = "Check Rust code with clippy"
 run = "cargo clippy --workspace --all-targets -- -D warnings"
 
+[tasks."rust:deps:check"]
+description = "Check Rust dependency advisories and license policy"
+run = "cargo deny check advisories licenses"
+
 [tasks."rust:test"]
 description = "Run workspace tests"
 run = "cargo test --workspace --all-targets"
