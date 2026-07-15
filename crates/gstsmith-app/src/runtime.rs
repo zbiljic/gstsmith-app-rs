@@ -194,3 +194,115 @@ fn stop(pipeline: &gst::Pipeline, timeout: Duration) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::future;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn runs_to_eos_and_returns_pipeline_to_null() {
+        crate::init().expect("GStreamer initializes");
+        let pipeline = test_pipeline(Some(1));
+        let observed = pipeline.clone();
+
+        let exit = PipelineRunner::new(pipeline)
+            .run(future::pending())
+            .await
+            .expect("pipeline runs to EOS");
+
+        assert_eq!(exit, PipelineExit::Eos);
+        assert_eq!(observed.current_state(), gst::State::Null);
+    }
+
+    #[tokio::test]
+    async fn stops_immediately_when_shutdown_is_requested() {
+        crate::init().expect("GStreamer initializes");
+        let pipeline = test_pipeline(None);
+        let observed = pipeline.clone();
+
+        let exit = PipelineRunner::new(pipeline)
+            .run(future::ready(()))
+            .await
+            .expect("pipeline handles shutdown");
+
+        assert_eq!(exit, PipelineExit::Shutdown);
+        assert_eq!(observed.current_state(), gst::State::Null);
+    }
+
+    #[tokio::test]
+    async fn drains_eos_when_shutdown_requests_finalization() {
+        crate::init().expect("GStreamer initializes");
+        let pipeline = test_pipeline(None);
+        let observed = pipeline.clone();
+
+        let exit = PipelineRunner::new(pipeline)
+            .shutdown_mode(ShutdownMode::Eos {
+                timeout: Duration::from_secs(2),
+            })
+            .run(future::ready(()))
+            .await
+            .expect("pipeline drains EOS");
+
+        assert_eq!(exit, PipelineExit::Shutdown);
+        assert_eq!(observed.current_state(), gst::State::Null);
+    }
+
+    #[tokio::test]
+    async fn reports_bus_errors_and_still_returns_pipeline_to_null() {
+        crate::init().expect("GStreamer initializes");
+        let pipeline = error_pipeline();
+        let observed = pipeline.clone();
+
+        let err = PipelineRunner::new(pipeline)
+            .run(future::pending())
+            .await
+            .expect_err("identity produces a pipeline error");
+
+        assert!(err.to_string().contains("pipeline error"));
+        assert_eq!(observed.current_state(), gst::State::Null);
+    }
+
+    fn test_pipeline(num_buffers: Option<i32>) -> gst::Pipeline {
+        let mut source = gst::ElementFactory::make("videotestsrc").property("is-live", true);
+        if let Some(num_buffers) = num_buffers {
+            source = source.property("num-buffers", num_buffers);
+        }
+        let source = source.build().expect("videotestsrc is available");
+        let sink = gst::ElementFactory::make("fakesink")
+            .property("sync", false)
+            .build()
+            .expect("fakesink is available");
+        let pipeline = gst::Pipeline::with_name("runtime-test");
+
+        pipeline
+            .add_many([&source, &sink])
+            .expect("elements are added");
+        source.link(&sink).expect("elements link");
+
+        pipeline
+    }
+
+    fn error_pipeline() -> gst::Pipeline {
+        let source = gst::ElementFactory::make("videotestsrc")
+            .property("num-buffers", 10i32)
+            .build()
+            .expect("videotestsrc is available");
+        let fail = gst::ElementFactory::make("identity")
+            .property("error-after", 1i32)
+            .build()
+            .expect("identity is available");
+        let sink = gst::ElementFactory::make("fakesink")
+            .build()
+            .expect("fakesink is available");
+        let pipeline = gst::Pipeline::with_name("runtime-error-test");
+
+        pipeline
+            .add_many([&source, &fail, &sink])
+            .expect("elements are added");
+        gst::Element::link_many([&source, &fail, &sink]).expect("elements link");
+
+        pipeline
+    }
+}
