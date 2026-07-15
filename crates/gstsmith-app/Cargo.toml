@@ -9,5 +9,11 @@ readme = { workspace = true }
 license = { workspace = true }
 repository = { workspace = true }
 
+[dependencies]
+anyhow = { workspace = true }
+futures = { workspace = true }
+gstreamer = { workspace = true }
+tokio = { workspace = true }
+
 [lints]
 workspace = true

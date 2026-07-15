@@ -11,6 +11,12 @@ repository = "https://github.com/zbiljic/gstsmith-app-rs"
 rust-version = "1.97.0"
 version = "0.1.0"
 
+[workspace.dependencies]
+anyhow = "1.0.103"
+futures = "0.3.32"
+gstreamer = { version = "0.25.3", features = ["v1_24"] }
+tokio = { version = "1.52.3", features = ["macros", "rt", "time"] }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
