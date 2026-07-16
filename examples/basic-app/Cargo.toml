@@ -9,7 +9,7 @@ publish = false
 
 [dependencies]
 anyhow = { workspace = true }
-gstsmith-app = { path = "../../crates/gstsmith-app" }
+gstsmith-app = { path = "../.." }
 tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
 
 [lints]

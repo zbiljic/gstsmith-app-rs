@@ -1,5 +1,16 @@
+[package]
+name = "gstsmith-app"
+description = "Runtime building blocks for Rust GStreamer applications."
+version = { workspace = true }
+edition = { workspace = true }
+authors = { workspace = true }
+rust-version = { workspace = true }
+readme = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+
 [workspace]
-members = ["crates/*", "examples/*"]
+members = ["examples/*"]
 resolver = "3"
 
 [workspace.package]
@@ -16,6 +27,15 @@ anyhow = "1.0.103"
 futures = "0.3.32"
 gstreamer = { version = "0.25.3", features = ["v1_24"] }
 tokio = { version = "1.52.3", features = ["macros", "rt", "time"] }
+
+[dependencies]
+anyhow = { workspace = true }
+futures = { workspace = true }
+gstreamer = { workspace = true }
+tokio = { workspace = true }
+
+[lints]
+workspace = true
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
