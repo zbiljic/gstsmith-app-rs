@@ -1,5 +1,7 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "platformCommit": "disabled",
+  "gitAuthor": "Renovate Bot <bot@renovateapp.com>",
   "extends": [
     "config:recommended",
     ":combinePatchMinorReleases",
