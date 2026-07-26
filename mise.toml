@@ -1,3 +1,6 @@
 [tools]
 "cargo:cargo-deny" = "0.20.2"
-rust = "1.97.0"
+rust = { version = "1.97.0", profile = "minimal", components = [
+  "rustfmt",
+  "clippy",
+] }
