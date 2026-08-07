@@ -79,6 +79,74 @@ async fn main() -> anyhow::Result<()> {
 `gstsmith-app` re-exports its GStreamer dependency as `gstsmith_app::gst` so an
 application does not accidentally mix incompatible GStreamer crate versions.
 
+## Composition helpers
+
+Assembling a pipeline by hand repeats a few small pieces: creating a named
+element with a useful error, exposing a bin's ghost pads, and deferring a link
+until a dynamic source pad appears. `gstsmith-app` provides these as optional,
+pure-construction helpers. They never add a bin to a pipeline and never carry
+application policy.
+
+Naming stays with the bin, not the `PipelineBin` trait. `GStreamer` requires
+element names to be unique within a parent bin, so a bin that may be built more
+than once takes a name in its constructor and derives its children's names from
+it (or leaves them unnamed and lets `GStreamer` assign unique ones). `BinBase` is
+an optional helper for that bookkeeping: embed it as a field, and it holds the
+bin's name and creates the bin and its named children.
+
+```rust
+use gstsmith_app::{BinBase, PipelineBin, ghost_sink, ghost_src, gst};
+use gstsmith_app::gst::prelude::*;
+
+struct ConvertScale {
+    base: BinBase,
+}
+
+impl PipelineBin for ConvertScale {
+    fn build(&self) -> anyhow::Result<gst::Bin> {
+        let bin = self.base.bin();
+        let convert = self.base.make("videoconvert", "convert")?;
+        let scale = self.base.make("videoscale", "scale")?;
+
+        bin.add_many([&convert, &scale])?;
+        gst::Element::link_many([&convert, &scale])?;
+
+        // A transform bin exposes ghost pads named `sink` and `src`, so the
+        // caller links it into a pipeline exactly like a plain element.
+        ghost_sink(&bin, &convert)?;
+        ghost_src(&bin, &scale)?;
+
+        Ok(bin)
+    }
+}
+```
+
+The free `make(factory, name)` helper is still available for elements built
+outside a bin (or when you want to name a child yourself).
+
+For elements whose source pad appears only after the pipeline starts
+(`decodebin`, demuxers, `rtspsrc`), `connect_dynamic` links the first matching
+pad to a sink pad. It rejects elements whose factory cannot emit a dynamic
+source pad and posts link failures to the pipeline bus:
+
+```rust,ignore
+gstsmith_app::connect_dynamic(&source, sink_pad, Some(caps), "rtspsrc -> depay")?;
+```
+
+The helper does not decide how long an application should wait for a matching
+pad. Applications that need a bounded startup failure should keep that timeout
+and shutdown policy locally.
+
+Run the example that composes a pipeline from a `PipelineBin` and stop it with
+Ctrl-C:
+
+```sh
+cargo run -p gstsmith-compose-app
+```
+
+These helpers are optional. An application can keep building elements and bins
+directly with native GStreamer APIs when that is already clear.
+
 ## Shutdown behavior
 
 The default shutdown mode immediately takes the pipeline to `Null`. This is the
