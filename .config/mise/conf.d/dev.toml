@@ -6,6 +6,14 @@ depends = ["*:*fmt"]
 description = "Check source formatting"
 depends = ["*:fmt:check"]
 
+[tasks."sort:crates"]
+description = "Sort Cargo manifest dependencies"
+run = "cargo sort --workspace --grouped --no-format --order package,dependencies,features"
+
+[tasks."sort:crates:check"]
+description = "Check Cargo manifest dependency ordering"
+run = "cargo sort --workspace --grouped --order package,dependencies,features --check"
+
 [tasks.lint]
 description = "Run all lint checks"
 depends = ["*:lint:*"]
@@ -26,4 +34,11 @@ depends = ["*:test"]
 [tasks."pre-commit"]
 description = "Run the full local development gate"
 alias = "prk"
-depends = ["fmt:check", "lint", "deps:check", "check", "test"]
+depends = [
+  "sort:crates:check",
+  "fmt:check",
+  "lint",
+  "deps:check",
+  "check",
+  "test",
+]

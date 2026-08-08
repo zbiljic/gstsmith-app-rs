@@ -9,6 +9,12 @@ readme = { workspace = true }
 license = { workspace = true }
 repository = { workspace = true }
 
+[dependencies]
+anyhow = { workspace = true }
+futures = { workspace = true }
+gstreamer = { workspace = true }
+tokio = { workspace = true }
+
 [workspace]
 members = ["examples/*"]
 resolver = "3"
@@ -27,15 +33,6 @@ anyhow = "1.0.104"
 futures = "0.3.33"
 gstreamer = { version = "0.25.3", features = ["v1_24"] }
 tokio = { version = "1.53.1", features = ["macros", "rt", "time"] }
-
-[dependencies]
-anyhow = { workspace = true }
-futures = { workspace = true }
-gstreamer = { workspace = true }
-tokio = { workspace = true }
-
-[lints]
-workspace = true
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -115,3 +112,6 @@ codegen-units = 1
 lto = true
 opt-level = "s"
 strip = true
+
+[lints]
+workspace = true
