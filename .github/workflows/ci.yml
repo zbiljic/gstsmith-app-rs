@@ -49,6 +49,9 @@ jobs:
       - name: Check dependency policy
         run: mise run deps:check
 
+      - name: Check dependency ordering
+        run: mise run sort:crates:check
+
       - name: Check formatting
         run: mise run fmt:check
 
