@@ -21,10 +21,11 @@ pub enum ShutdownMode {
     ///
     /// This is appropriate for live outputs that have no trailer to finalise.
     Immediate,
-    /// Send EOS and wait up to the supplied timeout for it to return on the bus.
+    /// Allow up to the supplied timeout to send EOS and receive it on the bus.
     ///
     /// This is appropriate for muxers and file outputs that need to write a
-    /// trailer before the pipeline is stopped.
+    /// trailer before the pipeline is stopped. Subsequent teardown to `Null`
+    /// is awaited separately and has no deadline.
     Eos { timeout: Duration },
 }
 
@@ -32,7 +33,6 @@ pub enum ShutdownMode {
 pub struct PipelineRunner {
     pipeline: gst::Pipeline,
     shutdown_mode: ShutdownMode,
-    state_change_timeout: Duration,
 }
 
 impl PipelineRunner {
@@ -42,7 +42,6 @@ impl PipelineRunner {
         Self {
             pipeline,
             shutdown_mode: ShutdownMode::Immediate,
-            state_change_timeout: Duration::from_secs(5),
         }
     }
 
@@ -53,17 +52,17 @@ impl PipelineRunner {
         self
     }
 
-    /// Set the maximum time to wait for the pipeline to reach `Null`.
-    #[must_use]
-    pub const fn state_change_timeout(mut self, timeout: Duration) -> Self {
-        self.state_change_timeout = timeout;
-        self
-    }
-
     /// Run the pipeline alongside an application-provided shutdown future.
     ///
     /// The pipeline is always asked to reach `Null` before this method returns,
     /// including when startup or bus processing fails.
+    /// Native lifecycle calls run on `GStreamer` worker threads. Teardown is
+    /// awaited without a deadline because native state changes cannot be cancelled.
+    ///
+    /// Dropping this future after it has been polled schedules cleanup, which
+    /// can finish after the future is dropped. If startup is still in progress,
+    /// cleanup follows it. Use the shutdown future and await `run` for graceful
+    /// EOS finalization and to observe cleanup errors.
     pub async fn run<S>(self, shutdown: S) -> Result<PipelineExit>
     where
         S: Future<Output = ()> + Send,
@@ -71,11 +70,33 @@ impl PipelineRunner {
         let Self {
             pipeline,
             shutdown_mode,
-            state_change_timeout,
         } = self;
 
-        let outcome = drive(&pipeline, shutdown, shutdown_mode).await;
-        let cleanup = stop(&pipeline, state_change_timeout);
+        let guard = PipelineCleanup {
+            pipeline,
+            armed: true,
+        };
+        // Keep cleanup ownership inside startup until the native call finishes,
+        // so cancellation cannot stop the pipeline before startup sets it Playing.
+        let (mut guard, startup) = guard
+            .pipeline
+            .clone()
+            .call_async_future(move |pipeline| {
+                let startup = pipeline
+                    .set_state(gst::State::Playing)
+                    .context("setting the pipeline to Playing");
+                (guard, startup)
+            })
+            .await;
+
+        let outcome = match startup {
+            Ok(_) => drive(&guard.pipeline, shutdown, shutdown_mode).await,
+            Err(err) => Err(err),
+        };
+        // Scheduling transfers cleanup ownership before the next cancellation point.
+        let cleanup = guard.pipeline.call_async_future(stop);
+        guard.armed = false;
+        let cleanup = cleanup.await;
 
         match (outcome, cleanup) {
             (Ok(exit), Ok(())) => Ok(exit),
@@ -83,6 +104,22 @@ impl PipelineRunner {
             (Err(err), Err(cleanup_err)) => Err(anyhow!(
                 "{err:#}; additionally failed to stop the pipeline: {cleanup_err:#}"
             )),
+        }
+    }
+}
+
+struct PipelineCleanup {
+    pipeline: gst::Pipeline,
+    armed: bool,
+}
+
+impl Drop for PipelineCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            self.pipeline.call_async(|pipeline| {
+                // stop logs failures even when cancellation leaves no caller.
+                let _cleanup = stop(pipeline);
+            });
         }
     }
 }
@@ -97,10 +134,6 @@ where
 {
     let bus = pipeline.bus().context("getting the pipeline message bus")?;
     let mut messages = bus.stream();
-
-    pipeline
-        .set_state(gst::State::Playing)
-        .context("setting the pipeline to Playing")?;
 
     tokio::pin!(shutdown);
 
@@ -134,13 +167,17 @@ where
         return Ok(PipelineExit::Shutdown);
     };
 
-    if !pipeline.send_event(gst::event::Eos::new()) {
-        bail!("pipeline rejected the shutdown EOS event");
-    }
-
-    tokio::time::timeout(timeout, wait_for_eos(messages))
-        .await
-        .context("timed out while draining the pipeline after shutdown")??;
+    tokio::time::timeout(timeout, async {
+        if !pipeline
+            .call_async_future(|pipeline| pipeline.send_event(gst::event::Eos::new()))
+            .await
+        {
+            bail!("pipeline rejected the shutdown EOS event");
+        }
+        wait_for_eos(messages).await
+    })
+    .await
+    .context("timed out while draining the pipeline after shutdown")??;
 
     Ok(PipelineExit::Shutdown)
 }
@@ -175,29 +212,28 @@ fn terminal_message(message: &gst::Message) -> Result<Option<PipelineExit>> {
     }
 }
 
-fn stop(pipeline: &gst::Pipeline, timeout: Duration) -> Result<()> {
+fn stop(pipeline: &gst::Pipeline) -> Result<()> {
     pipeline
         .set_state(gst::State::Null)
-        .context("setting the pipeline to Null")?;
-
-    let nanoseconds = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX);
-    let (state_result, current, pending) =
-        pipeline.state(gst::ClockTime::from_nseconds(nanoseconds));
-
-    state_result.with_context(|| {
-        format!("waiting for the pipeline to reach Null (current={current:?}, pending={pending:?})")
-    })?;
-
-    if current != gst::State::Null {
-        bail!("pipeline did not reach Null (current={current:?}, pending={pending:?})");
-    }
-
-    Ok(())
+        .map(|_| ())
+        .context("setting the pipeline to Null")
+        .inspect_err(|err| {
+            gst::error!(
+                gst::CAT_RUST,
+                obj = pipeline,
+                "pipeline cleanup failed: {err:#}"
+            );
+        })
 }
 
 #[cfg(test)]
 mod tests {
-    use std::future;
+    use std::{
+        future,
+        sync::{Mutex, mpsc},
+    };
+
+    use futures::channel::oneshot;
 
     use super::*;
 
@@ -262,6 +298,154 @@ mod tests {
 
         assert!(err.to_string().contains("pipeline error"));
         assert_eq!(observed.current_state(), gst::State::Null);
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_running_pipeline_returns_it_to_null() {
+        crate::init().expect("GStreamer initializes");
+        let pipeline = test_pipeline(None);
+        let observed = pipeline.clone();
+        let task = tokio::spawn(PipelineRunner::new(pipeline).run(future::pending()));
+
+        wait_for_state(&observed, gst::State::Playing).await;
+        task.abort();
+        assert!(task.await.expect_err("runner is cancelled").is_cancelled());
+        wait_for_state(&observed, gst::State::Null).await;
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_startup_cleans_up_after_startup_finishes() {
+        crate::init().expect("GStreamer initializes");
+        let pipeline = test_pipeline(None);
+        let observed = pipeline.clone();
+        let (entered, started) = oneshot::channel();
+        let (release, blocked) = mpsc::channel();
+        let gate = Mutex::new(Some((entered, blocked)));
+        pipeline
+            .bus()
+            .expect("pipeline has a bus")
+            .set_sync_handler(move |_, message| {
+                if matches!(message.view(), gst::MessageView::StateChanged(_)) {
+                    let gate = gate.lock().expect("startup gate is not poisoned").take();
+                    if let Some((entered, blocked)) = gate {
+                        entered.send(()).expect("test waits for startup");
+                        // Bounded so a regression cannot leave the native worker stuck.
+                        let _released = blocked.recv_timeout(Duration::from_secs(5));
+                    }
+                }
+                gst::BusSyncReply::Pass
+            });
+        let task = tokio::spawn(PipelineRunner::new(pipeline).run(future::pending()));
+
+        tokio::time::timeout(Duration::from_secs(5), started)
+            .await
+            .expect("startup begins")
+            .expect("startup signals the test");
+        task.abort();
+        assert!(task.await.expect_err("runner is cancelled").is_cancelled());
+        release
+            .send(())
+            .expect("startup has not blocked the executor");
+        wait_for_state(&observed, gst::State::Null).await;
+    }
+
+    #[tokio::test]
+    async fn slow_teardown_keeps_the_executor_responsive_and_survives_cancellation() {
+        crate::init().expect("GStreamer initializes");
+        let pipeline = test_pipeline(None);
+        let observed = pipeline.clone();
+        let source = pipeline
+            .iterate_sources()
+            .next()
+            .expect("source exists")
+            .expect("source is readable");
+        let (entered, streaming) = oneshot::channel();
+        let (release, blocked) = mpsc::channel();
+        let gate = Mutex::new(Some((entered, blocked)));
+        source
+            .static_pad("src")
+            .expect("source has a pad")
+            .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                let (entered, blocked) = gate
+                    .lock()
+                    .expect("streaming gate is not poisoned")
+                    .take()
+                    .expect("probe runs once");
+                entered.send(()).expect("shutdown waits for a buffer");
+                let _released = blocked.recv_timeout(Duration::from_secs(5));
+                gst::PadProbeReturn::Remove
+            });
+        let (requested, shutdown_requested) = oneshot::channel();
+        let task = tokio::spawn(PipelineRunner::new(pipeline).run(async {
+            streaming.await.expect("source starts streaming");
+            requested.send(()).expect("test waits for shutdown");
+        }));
+
+        tokio::time::timeout(Duration::from_secs(5), shutdown_requested)
+            .await
+            .expect("shutdown begins")
+            .expect("shutdown signals the test");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            !task.is_finished(),
+            "teardown still waits for the streaming thread"
+        );
+        task.abort();
+        assert!(task.await.expect_err("runner is cancelled").is_cancelled());
+        release
+            .send(())
+            .expect("the executor runs before the probe's timeout");
+        wait_for_state(&observed, gst::State::Null).await;
+    }
+
+    #[tokio::test]
+    async fn eos_timeout_still_returns_pipeline_to_null() {
+        crate::init().expect("GStreamer initializes");
+        let pipeline = test_pipeline(None);
+        let observed = pipeline.clone();
+        let sink = pipeline
+            .iterate_sinks()
+            .next()
+            .expect("sink exists")
+            .expect("sink is readable");
+        sink.static_pad("sink").expect("sink has a pad").add_probe(
+            gst::PadProbeType::EVENT_DOWNSTREAM,
+            |_, info| {
+                if info
+                    .event()
+                    .is_some_and(|event| event.type_() == gst::EventType::Eos)
+                {
+                    gst::PadProbeReturn::Drop
+                } else {
+                    gst::PadProbeReturn::Ok
+                }
+            },
+        );
+
+        let err = PipelineRunner::new(pipeline)
+            .shutdown_mode(ShutdownMode::Eos {
+                timeout: Duration::from_millis(20),
+            })
+            .run(future::ready(()))
+            .await
+            .expect_err("EOS cannot reach the bus");
+
+        assert!(err.to_string().contains("timed out while draining"));
+        assert_eq!(observed.current_state(), gst::State::Null);
+    }
+
+    async fn wait_for_state(element: &impl IsA<gst::Element>, state: gst::State) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let (_, current, pending) = element.state(gst::ClockTime::ZERO);
+                if current == state && pending == gst::State::VoidPending {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("element reaches the expected state");
     }
 
     fn test_pipeline(num_buffers: Option<i32>) -> gst::Pipeline {

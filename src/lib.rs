@@ -2,7 +2,7 @@
 //!
 //! Applications build their pipeline topology in Rust and hand the resulting
 //! [`gst::Pipeline`] to [`PipelineRunner`]. The runner owns the common lifecycle:
-//! bus processing, shutdown coordination, and bounded teardown to `Null`.
+//! bus processing, shutdown coordination, and teardown to `Null`.
 //!
 //! Optional static composition helpers cover the repetitive parts of assembling
 //! a pipeline by hand. They are pure construction; a bin never owns its

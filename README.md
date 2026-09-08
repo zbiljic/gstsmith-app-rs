@@ -163,8 +163,10 @@ let runner = PipelineRunner::new(pipeline).shutdown_mode(ShutdownMode::Eos {
 });
 ```
 
-After either shutdown path, the runner waits up to five seconds for the pipeline
-to reach `Null`. The timeout can be changed with `state_change_timeout`.
+After shutdown, the runner awaits teardown to `Null` without a deadline. The EOS
+timeout only covers sending and receiving EOS. Cancelling an active `run`
+schedules background cleanup; signal shutdown and await `run` for graceful EOS
+finalization.
 
 ## Using a service runtime
 
