@@ -67,3 +67,19 @@ jobs:
 
       - name: Run tests
         run: mise run test
+
+      - name: Read minimum supported Rust version
+        run: |
+          sed -n 's/^rust-version = "\([^"]*\)"$/MSRV=\1/p' Cargo.toml >> "$GITHUB_ENV"
+
+      - name: Cache minimum supported Rust version toolchain
+        uses: actions/cache@v5
+        with:
+          path: ~/.rustup/toolchains/${{ env.MSRV }}-*
+          key: rust-msrv-${{ runner.os }}-${{ runner.arch }}-${{ env.MSRV }}
+
+      - name: Install minimum supported Rust version toolchain
+        run: mise install "rust@$MSRV"
+
+      - name: Test minimum supported Rust version
+        run: cargo +"$MSRV" test --workspace --all-features --locked
