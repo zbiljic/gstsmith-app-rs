@@ -38,7 +38,7 @@ jobs:
       - name: Install GStreamer
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends \
+          sudo apt-get install -y --no-install-recommends \
             gstreamer1.0-plugins-base \
             gstreamer1.0-tools \
             libgstreamer1.0-dev \
