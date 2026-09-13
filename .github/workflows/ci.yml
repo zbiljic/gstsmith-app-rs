@@ -66,7 +66,7 @@ jobs:
         run: mise run check
 
       - name: Run tests
-        run: mise run test
+        run: cargo test --workspace --all-targets -- --test-threads=1
 
       - name: Read minimum supported Rust version
         run: |
@@ -82,4 +82,4 @@ jobs:
         run: mise install "rust@$MSRV"
 
       - name: Test minimum supported Rust version
-        run: cargo +"$MSRV" test --workspace --all-features --locked
+        run: cargo +"$MSRV" test --workspace --all-features --locked -- --test-threads=1
