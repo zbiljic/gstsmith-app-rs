@@ -45,7 +45,7 @@ jobs:
             libgstreamer-plugins-base1.0-dev
 
       - name: Setup mise
-        uses: jdx/mise-action@v4
+        uses: jdx/mise-action@v5
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
