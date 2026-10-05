@@ -30,9 +30,10 @@ pub enum ShutdownMode {
 }
 
 /// Drives one `GStreamer` pipeline until EOS, failure, or application shutdown.
-pub struct PipelineRunner {
+pub struct PipelineRunner<F = fn(&gst::MessageRef) -> Result<()>> {
     pipeline: gst::Pipeline,
     shutdown_mode: ShutdownMode,
+    on_message: F,
 }
 
 impl PipelineRunner {
@@ -42,9 +43,15 @@ impl PipelineRunner {
         Self {
             pipeline,
             shutdown_mode: ShutdownMode::Immediate,
+            on_message: |_| Ok(()),
         }
     }
+}
 
+impl<F> PipelineRunner<F>
+where
+    F: FnMut(&gst::MessageRef) -> Result<()> + Send,
+{
     /// Set how application shutdown should be handled.
     #[must_use]
     pub const fn shutdown_mode(mut self, mode: ShutdownMode) -> Self {
@@ -52,7 +59,32 @@ impl PipelineRunner {
         self
     }
 
+    /// Set the application callback for nonterminal bus messages.
+    ///
+    /// The callback receives nonterminal messages in bus order, including
+    /// `Element` and `Application` messages, during normal operation and shutdown
+    /// EOS draining. It runs synchronously on the task polling `run`; keep
+    /// it short and hand off slow work to the application. It may borrow
+    /// application state. By default, no application callback is run.
+    ///
+    /// EOS and errors remain owned by the runner and are not passed to the
+    /// callback. Applications decide how to handle other messages. Callback
+    /// errors stop the run and are returned after teardown to `Null`.
+    #[must_use]
+    pub fn on_message<G>(self, on_message: G) -> PipelineRunner<G>
+    where
+        G: FnMut(&gst::MessageRef) -> Result<()> + Send,
+    {
+        PipelineRunner {
+            pipeline: self.pipeline,
+            shutdown_mode: self.shutdown_mode,
+            on_message,
+        }
+    }
+
     /// Run the pipeline alongside an application-provided shutdown future.
+    ///
+    /// Nonterminal messages are passed to the callback set by [`Self::on_message`].
     ///
     /// The pipeline is always asked to reach `Null` before this method returns,
     /// including when startup or bus processing fails.
@@ -70,6 +102,7 @@ impl PipelineRunner {
         let Self {
             pipeline,
             shutdown_mode,
+            mut on_message,
         } = self;
 
         let guard = PipelineCleanup {
@@ -90,7 +123,7 @@ impl PipelineRunner {
             .await;
 
         let outcome = match startup {
-            Ok(_) => drive(&guard.pipeline, shutdown, shutdown_mode).await,
+            Ok(_) => drive(&guard.pipeline, shutdown, shutdown_mode, &mut on_message).await,
             Err(err) => Err(err),
         };
         // Scheduling transfers cleanup ownership before the next cancellation point.
@@ -124,13 +157,15 @@ impl Drop for PipelineCleanup {
     }
 }
 
-async fn drive<S>(
+async fn drive<S, F>(
     pipeline: &gst::Pipeline,
     shutdown: S,
     shutdown_mode: ShutdownMode,
+    on_message: &mut F,
 ) -> Result<PipelineExit>
 where
     S: Future<Output = ()> + Send,
+    F: FnMut(&gst::MessageRef) -> Result<()> + Send,
 {
     let bus = pipeline.bus().context("getting the pipeline message bus")?;
     let mut messages = bus.stream();
@@ -140,11 +175,11 @@ where
     loop {
         tokio::select! {
             () = &mut shutdown => {
-                return handle_shutdown(pipeline, &mut messages, shutdown_mode).await;
+                return handle_shutdown(pipeline, &mut messages, shutdown_mode, on_message).await;
             }
             message = messages.next() => {
                 return match message {
-                    Some(message) => match terminal_message(&message)? {
+                    Some(message) => match handle_message(&message, on_message)? {
                         Some(exit) => Ok(exit),
                         None => continue,
                     },
@@ -155,13 +190,15 @@ where
     }
 }
 
-async fn handle_shutdown<M>(
+async fn handle_shutdown<M, F>(
     pipeline: &gst::Pipeline,
     messages: &mut M,
     mode: ShutdownMode,
+    on_message: &mut F,
 ) -> Result<PipelineExit>
 where
     M: Stream<Item = gst::Message> + Unpin,
+    F: FnMut(&gst::MessageRef) -> Result<()> + Send,
 {
     let ShutdownMode::Eos { timeout } = mode else {
         return Ok(PipelineExit::Shutdown);
@@ -174,7 +211,7 @@ where
         {
             bail!("pipeline rejected the shutdown EOS event");
         }
-        wait_for_eos(messages).await
+        wait_for_eos(messages, on_message).await
     })
     .await
     .context("timed out while draining the pipeline after shutdown")??;
@@ -182,9 +219,10 @@ where
     Ok(PipelineExit::Shutdown)
 }
 
-async fn wait_for_eos<M>(messages: &mut M) -> Result<()>
+async fn wait_for_eos<M, F>(messages: &mut M, on_message: &mut F) -> Result<()>
 where
     M: Stream<Item = gst::Message> + Unpin,
+    F: FnMut(&gst::MessageRef) -> Result<()> + Send,
 {
     loop {
         let message = messages
@@ -192,15 +230,18 @@ where
             .await
             .context("pipeline message bus closed while draining EOS")?;
 
-        if terminal_message(&message)?.is_some() {
+        if handle_message(&message, on_message)?.is_some() {
             return Ok(());
         }
     }
 }
 
-fn terminal_message(message: &gst::Message) -> Result<Option<PipelineExit>> {
+fn handle_message<F>(message: &gst::MessageRef, on_message: &mut F) -> Result<Option<PipelineExit>>
+where
+    F: FnMut(&gst::MessageRef) -> Result<()> + Send,
+{
     match message.view() {
-        gst::MessageView::Eos(..) => Ok(Some(PipelineExit::Eos)),
+        gst::MessageView::Eos(..) => return Ok(Some(PipelineExit::Eos)),
         gst::MessageView::Error(err) => {
             let source = err
                 .src()
@@ -208,8 +249,11 @@ fn terminal_message(message: &gst::Message) -> Result<Option<PipelineExit>> {
             let debug = err.debug().unwrap_or_default();
             bail!("pipeline error from {source}: {} ({debug})", err.error());
         }
-        _ => Ok(None),
+        _ => {}
     }
+
+    on_message(message).context("handling an application bus message")?;
+    Ok(None)
 }
 
 fn stop(pipeline: &gst::Pipeline) -> Result<()> {

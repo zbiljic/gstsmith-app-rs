@@ -6,6 +6,7 @@ the repetitive lifecycle around it:
 
 - initialize GStreamer
 - start a pipeline and consume its message bus asynchronously
+- deliver element and application results to an optional message handler
 - stop on EOS, a pipeline error, or an application-provided shutdown future
 - optionally drain EOS so muxers and file outputs can finalize
 - always take the pipeline to `Null` before returning
@@ -78,6 +79,37 @@ async fn main() -> anyhow::Result<()> {
 
 `gstsmith-app` re-exports its GStreamer dependency as `gstsmith_app::gst` so an
 application does not accidentally mix incompatible GStreamer crate versions.
+
+## Application messages
+
+Use `on_message` to process nonterminal bus messages, including element
+and application results:
+
+```rust
+let exit = PipelineRunner::new(pipeline)
+    .on_message(|message| {
+        if matches!(
+            message.view(),
+            gst::MessageView::Element(_) | gst::MessageView::Application(_)
+        ) {
+            if let Some(result) = message.structure() {
+                println!("{result}");
+            }
+        }
+        Ok(())
+    })
+    .run(shutdown_signal())
+    .await?;
+```
+
+The callback receives messages in bus order, including while draining EOS on
+shutdown, and may borrow mutable application state. It runs synchronously on
+the runner's task; hand slow work off to the application. Returning an error
+stops the pipeline and propagates the error after teardown to `Null`. Omit
+`on_message` when no application message handling is needed.
+
+The runner handles EOS and errors itself. Applications decide how to handle
+other messages.
 
 ## Composition helpers
 
