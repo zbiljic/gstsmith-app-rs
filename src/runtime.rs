@@ -330,12 +330,135 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delivers_results_and_cleans_up_on_handler_errors_while_running_and_draining() {
+        crate::init().expect("GStreamer initializes");
+
+        for (draining, fail_handler) in [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let pipeline = test_pipeline(if draining { None } else { Some(1) });
+            let observed = pipeline.clone();
+            let sink = pipeline
+                .iterate_sinks()
+                .next()
+                .expect("sink exists")
+                .expect("sink is readable");
+            sink.static_pad("sink").expect("sink has a pad").add_probe(
+                gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_DOWNSTREAM,
+                move |pad, info| {
+                    let post_results = if draining {
+                        info.event()
+                            .is_some_and(|event| event.type_() == gst::EventType::Eos)
+                    } else {
+                        info.buffer().is_some()
+                    };
+                    if !post_results {
+                        return gst::PadProbeReturn::Ok;
+                    }
+
+                    let element = pad.parent_element().expect("pad belongs to the sink");
+                    let result = gst::Structure::builder("test-result")
+                        .field("text", "recognized text")
+                        .build();
+                    for message in [
+                        gst::message::Element::builder(result.clone())
+                            .src(&element)
+                            .build(),
+                        gst::message::Application::builder(result)
+                            .src(&element)
+                            .build(),
+                    ] {
+                        element
+                            .post_message(message)
+                            .expect("result reaches the bus");
+                    }
+                    gst::PadProbeReturn::Remove
+                },
+            );
+
+            let mut received = Vec::new();
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                PipelineRunner::new(pipeline)
+                    .on_message(|message| {
+                        assert!(!matches!(
+                            message.view(),
+                            gst::MessageView::Eos(_) | gst::MessageView::Error(_)
+                        ));
+                        if matches!(
+                            message.view(),
+                            gst::MessageView::Element(_) | gst::MessageView::Application(_)
+                        ) {
+                            assert_eq!(message.src(), Some(sink.upcast_ref()));
+                            let structure = message.structure().expect("result has a structure");
+                            assert_eq!(structure.name(), "test-result");
+                            assert_eq!(structure.get::<&str>("text")?, "recognized text");
+                            received.push(message.type_());
+                            if fail_handler {
+                                bail!("application rejected the result");
+                            }
+                        }
+                        Ok(())
+                    })
+                    .shutdown_mode(ShutdownMode::Eos {
+                        timeout: Duration::from_secs(2),
+                    })
+                    .run(async {
+                        if !draining {
+                            future::pending::<()>().await;
+                        }
+                    }),
+            )
+            .await
+            .expect("runner finishes");
+
+            if fail_handler {
+                let err = result.expect_err("handler failure stops the runner");
+                assert!(format!("{err:#}").contains("application rejected the result"));
+                assert_eq!(received, [gst::MessageType::Element]);
+            } else {
+                assert_eq!(
+                    result.expect("runner handles results"),
+                    if draining {
+                        PipelineExit::Shutdown
+                    } else {
+                        PipelineExit::Eos
+                    }
+                );
+                assert_eq!(
+                    received,
+                    [gst::MessageType::Element, gst::MessageType::Application]
+                );
+            }
+            assert_eq!(observed.current_state(), gst::State::Null);
+        }
+    }
+
+    #[test]
+    fn forwards_latency_to_the_application_handler() {
+        crate::init().expect("GStreamer initializes");
+        let mut received = None;
+
+        let exit = handle_message(&gst::message::Latency::new(), &mut |message| {
+            received = Some(message.type_());
+            Ok(())
+        })
+        .expect("latency is delivered to the application");
+
+        assert_eq!(exit, None);
+        assert_eq!(received, Some(gst::MessageType::Latency));
+    }
+
+    #[tokio::test]
     async fn reports_bus_errors_and_still_returns_pipeline_to_null() {
         crate::init().expect("GStreamer initializes");
         let pipeline = error_pipeline();
         let observed = pipeline.clone();
 
         let err = PipelineRunner::new(pipeline)
+            .on_message(|message| {
+                assert!(!matches!(message.view(), gst::MessageView::Error(_)));
+                Ok(())
+            })
             .run(future::pending())
             .await
             .expect_err("identity produces a pipeline error");
